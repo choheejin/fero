@@ -2,7 +2,6 @@ package com.ssafy.common.redis.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.impl.LaissezFaireSubTypeValidator;
-import com.ssafy.common.redis.service.RedisExpirationListener;
 import com.ssafy.common.redis.service.SessionExpiredEvent;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
@@ -15,7 +14,6 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.listener.PatternTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
-import org.springframework.data.redis.listener.adapter.MessageListenerAdapter;
 import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
@@ -39,6 +37,7 @@ public class RedisConfig {
 
         // Lettuce 클라이언트 설정
         LettuceConnectionFactory connectionFactory = new LettuceConnectionFactory(redisConfig);
+
         connectionFactory.afterPropertiesSet(); // 연결 초기화
         return connectionFactory;
     }
@@ -76,6 +75,7 @@ public class RedisConfig {
 
         container.addMessageListener((message, pattern) -> {
             String expiredKey = new String(message.getBody());
+            log.info("__keyevent@*__:expired: {}", expiredKey);
             eventPublisher.publishEvent(new SessionExpiredEvent(this, expiredKey)); // 이벤트 발행
         }, new PatternTopic("__keyevent@*__:expired"));
 

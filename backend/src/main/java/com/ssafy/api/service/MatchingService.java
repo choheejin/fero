@@ -1,11 +1,9 @@
 package com.ssafy.api.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ssafy.api.request.*;
 import com.ssafy.api.response.GameResultInfoRes;
 import com.ssafy.api.response.RankUpdateRes;
 import com.ssafy.common.util.JwtTokenUtil;
-import com.ssafy.db.entity.ExerciseLog;
 import com.ssafy.db.entity.User;
 import com.ssafy.db.entity.UserCharacter;
 import com.ssafy.db.entity.UserStats;
@@ -14,19 +12,17 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
+import org.springframework.data.redis.connection.Message;
+import org.springframework.data.redis.connection.MessageListener;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.fasterxml.jackson.databind.SerializationFeature;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.transaction.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 
@@ -88,7 +84,6 @@ public class MatchingService {
         WaitingUser waitingUser = new WaitingUser(userToken, exerciseType, rankScore, LocalDateTime.now());
 
         // 운동 타입별 키 생성
-        String queueKey = getQueueKey(exerciseType);
         String sortedKey = getSortedSetKey(exerciseType);
         String userInfoKey = getUserInfoKey(exerciseType);
         String expireKey = getUserJoinTimeKey(exerciseType, userToken);
@@ -96,60 +91,26 @@ public class MatchingService {
 
         // 유저 정보 저장
         redisTemplate.opsForHash().put(userInfoKey, userToken, waitingUser);
-        // 입장 순서 큐에 추가
-        redisTemplate.opsForList().rightPush(queueKey, userToken);
         // 스코어 정렬셋에 추가
         redisTemplate.opsForZSet().add(sortedKey, userToken, (double) rankScore);
         // 입장 시간 TTL 설정 (5분 만료)
-        stringRedisTemplate.opsForValue().set(expireKey, "EXPIRED", Duration.ofMinutes(5));
+        stringRedisTemplate.opsForValue().set(expireKey, "EXPIRED", Duration.ofMinutes(1));
 
         log.info("✅ {} 사용자가 {} 대기열에 입장 (TTL 설정 완료)", userToken, exerciseType);
-        logWaitingRoomStatus(exerciseType);
-
+        logWaitingRoomStatus(getUserInfoKey(exerciseType));
     }
 
-    // 1-2. 대기방 상태
-    private void logWaitingRoomStatus(Long exerciseType) {
-        String queueKey = getQueueKey(exerciseType);
-        String userInfoKey = getUserInfoKey(exerciseType);
-
-        List<Object> userTokens = redisTemplate.opsForList().range(queueKey, 0, -1);
-
-        ObjectMapper mapper = new ObjectMapper();
-        // DateTime 모듈 등록
-        mapper.registerModule(new JavaTimeModule());
-        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-
-        System.out.println("총 큐의 대기 인원: " + (userTokens != null ? userTokens.size() : 0));
-
-        if (userTokens != null && !userTokens.isEmpty()) {
-            System.out.println("대기중인 사용자들:");
-            for (Object userId : userTokens) {
-                Map<Object, Object> userMap = redisTemplate.opsForHash().entries(userInfoKey);
-                Object userObj = userMap.get(userId.toString());
-
-                if (userObj != null) {
-                    try {
-                        WaitingUser user = mapper.convertValue(userObj, WaitingUser.class);
-                        long waitingSeconds = Duration.between(user.getJoinTime(), LocalDateTime.now()).getSeconds();
-                        System.out.printf("- ID: %s, 점수: %d, 대기시간: %d초%n",
-                                user.getUserId(),
-                                user.getRankScore(),
-                                waitingSeconds
-                        );
-                    } catch (Exception e) {
-                        System.out.println("Error converting user: " + e.getMessage());
-                    }
-                }
-            }
-        }
+    // 1-2. 대기방 상태 => 전체 사용자를 출력하였던 기존의 코드를 상위 10명을 출력하게 수정
+    private void logWaitingRoomStatus(String userInfoKey) {
+        // 전체 유저 수 조회
+        Long totalUsers = redisTemplate.opsForHash().size(userInfoKey);
+        System.out.println("전체 유저 수: " + totalUsers);
         System.out.println("==========================================\n");
     }
 
     // 2-1. 대기방 퇴장 메서드 
     public void leaveWaitingRoom(String userToken, Long exerciseType) {
         String userInfoKey = getUserInfoKey(exerciseType);
-
 
         // 유저 정보 조회 시도
         Object userObj = redisTemplate.opsForHash().get(userInfoKey, userToken);
@@ -179,8 +140,7 @@ public class MatchingService {
         log.info("[REDIS REMOVE SET] 정렬 세트에서 제거된 아이템 수: {}", removedFromSortedSet);
     }
 
-    // 매칭 처리 로직 (스케줄러로 주기적으로 실행할 것)
-    @Scheduled(fixedRate = 300000) // 5분마다 실행
+    // 매칭 처리 로직 (스케줄러로 주기적으로 실행할 것) => 전체 유저를 모두 불러서 삭제하는 걸 알 수 있음
     public void deleteUsers() {
         List<Long> exerciseTypes = exerciseStatsRatioRepository.findAllExerciseStatsRatioId();
 
@@ -208,7 +168,6 @@ public class MatchingService {
                 if (ttl == null || ttl == -2) { // 남은 기본 대기 시간이 만료 되었을 때 삭제
                     log.info("[Matching] 키 만료됨: {}", expireKeyString);
                 } else if (ttl <= 0) {
-                    redisTemplate.opsForList().remove(queueKey, 1, userToken);
                     redisTemplate.opsForZSet().remove(sortedSetKey, userToken);
                     redisTemplate.opsForHash().delete(userInfoKey, userToken);
                     redisTemplate.delete(expireKeyString);
@@ -225,7 +184,7 @@ public class MatchingService {
     @EventListener
     public void processMatching(EnterWaitingRoomEvent event){
         log.info("🎯 매칭 프로세스 시작 - User: {}, Exercise: {}, Score: {}",
-                event.getUserToken(), event.getExerciseId(), event.getRankScore());
+                event.getUserToken().replace("Bearer ", ""), event.getExerciseId(), event.getRankScore());
 
         processMatchingLogic(event.getExerciseId(), event.getUserToken(), event.getRankScore());
     }
@@ -234,66 +193,57 @@ public class MatchingService {
     private void processMatchingLogic(Long exerciseId, String userToken, Short rankScore) {
         String queueKey = getQueueKey(exerciseId);
         String sortedSetKey = getSortedSetKey(exerciseId);
+        String userInfoKey = getUserInfoKey(exerciseId);
 
-        // 1. queue 확인 - 첫 번째 유저부터 순차적으로 확인
-        List<Object> queue = redisTemplate.opsForList().range(queueKey, 0, -1);
-        if (queue == null || queue.isEmpty()) {
-            log.info("Queue is empty for exercise type: {}", exerciseId);
+        // 1. 새로운 유저의 점수 범위에 맞는 후보자 찾기 (rankScore ± 100 범위)
+        Set<Object> candidates = redisTemplate.opsForZSet().rangeByScore(
+                sortedSetKey,
+                rankScore - 99,
+                rankScore + 99);
+
+        if (candidates == null || candidates.isEmpty()) {
+            log.info("점수 범위 내({} ± 100)에 매칭 가능한 후보가 없습니다.", rankScore);
             return;
         }
 
-        // 2. queue 순회하면서 매칭 시도하기
-        int queueSize = queue.size();
-        int currentIndex = 0; // 큐에서 맨 밑에 있는 애
+        log.info("점수 범위 내({} ± 100) 후보자 수: {}", rankScore, candidates.size());
 
-        while(currentIndex < queueSize) {
-            String currentUserToken = queue.get(currentIndex).toString();
+        // 2. 후보자들의 대기 시간 정보를 가져와서 정렬
+        List<WaitingUser> eligibleUsers = new ArrayList<>();
+        for (Object candidateObj : candidates) {
+            String candidateToken = candidateObj.toString();
+            // 자기 자신은 제외
+            if (candidateToken.equals(userToken)) continue;
 
-            // 3. sortedSet에서 현재 유저의 점수 확인
-            Double currentUserScore = redisTemplate.opsForZSet().score(sortedSetKey, currentUserToken);
+            log.info("매칭시도자의 정보: {}", userToken);
+            log.info("후보자 정보: {}", candidateObj);
 
-            // 3-1. sortedSet에 없는 경우 (이미 매칭되어서 나가거나 타임아웃)
-            if (currentUserScore == null) {
-                log.info("User {} not found in sorted set, removing from queue", currentUserToken);
-                redisTemplate.opsForList().remove(queueKey, 1, currentUserToken);
-                currentIndex++;
-                continue;
-            }
+            // 후보자 정보 가져오기
+            Object userInfoObj = redisTemplate.opsForHash().get(userInfoKey, candidateToken);
+            log.info("가져온 후보자의 정보: {}", userInfoObj);
+            log.info("가져온 후보자의 클래스: {}", userInfoObj.getClass());
 
-            // 3-2. 매칭 가능한 상대 찾기 (rankScore +- 100 범위)
-            // 후보자가 sorted-set 에 없으면 스킵 -- queue에서 삭제
-            Double currentZScore = redisTemplate.opsForZSet().score(sortedSetKey, currentUserToken);
-            if (currentZScore == null) {
-                redisTemplate.opsForList().remove(queueKey, 1, currentUserToken);
-                continue;
-            }
-            // 점수 차이가 100 이내인지 확인
-            System.out.println("들어올 애 점수 : "+rankScore);
-            System.out.println("큐에 있는 후보자 점수 : "+currentUserScore);
-            if (Math.abs(currentUserScore - rankScore) <= 100) {
-                // 매칭 성공
-                handleMatchSuccess(currentUserToken, userToken, exerciseId);
-                matchFound = true;
-                return; // 매칭 완료되면 종료
-            }
+            WaitingUser waitingUser = (WaitingUser) userInfoObj;
+
+            log.info("waitingUser: {}", waitingUser);
+            eligibleUsers.add(waitingUser);
+        }
 
 
-            for (int i=currentIndex; i < queueSize; i++) {
-                String candidateUserToken = queue.get(i).toString();
-                Double candidateScore = redisTemplate.opsForZSet().score(sortedSetKey, candidateUserToken);
+        // 3. 대기 시간이 오래된 순으로 정렬
+        eligibleUsers.sort(Comparator.comparing(WaitingUser::getJoinTime));
+        log.info("후보자 정보: {}", eligibleUsers);
 
-                // 후보자가 sorted-set 에 없으면 스킵 -- queue에서 삭제
-                if (candidateScore == null) {
-                    redisTemplate.opsForList().remove(queueKey, 1, candidateUserToken);
-                    continue;
-                }
-            }
-
-            if (!matchFound) {
-                log.info("적합한 매칭 상대를 찾지 못함 (score: {}), moving to next user",
-                        currentUserScore);
-            }
-            currentIndex++;
+        // 4. 가장 오래 기다린 유저와 매칭
+        if (!eligibleUsers.isEmpty()) {
+            WaitingUser matchedUser = eligibleUsers.get(0);
+            handleMatchSuccess(matchedUser.getUserId(), userToken, exerciseId);
+            matchFound = true;
+            log.info("🎯 대기 시간이 가장 긴 사용자와 매칭 성공! User: {}, Wait Time: {}",
+                    matchedUser.getUserId(),
+                    Duration.between(matchedUser.getJoinTime(), LocalDateTime.now()).getSeconds());
+        } else {
+            log.info("적합한 매칭 상대를 찾지 못했습니다 (score: {})", rankScore);
         }
     }
 

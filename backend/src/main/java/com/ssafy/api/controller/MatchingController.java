@@ -44,7 +44,7 @@ public class MatchingController {
         if (!JwtTokenUtil.validateToken(accessToken)) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(BaseResponseBody.of(401, "Invalid Access Token"));
         }
-        String userId = JwtTokenUtil.getUserIdFromJWT(accessToken);
+        String userId = JwtTokenUtil.extractUserIdFromToken(accessToken);
 
         System.out.printf("사용자 이름 : %s, 운동 ID : %s\n",userId, exerciseType);
 
@@ -56,7 +56,7 @@ public class MatchingController {
 
         Short rankScore = userRankscore.map(UserRankScores::getRankScore).orElse((short) 1000);
 
-//        System.out.println("사용자 랭크 점수: " + rankScore);
+        System.out.println("사용자 랭크 점수: " + rankScore);
 
         try {
             // 대기방 입장 처리

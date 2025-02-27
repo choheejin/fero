@@ -34,6 +34,7 @@ public class RedisExpirationListener implements ApplicationListener<SessionExpir
             log.info("🎯 Attempting to remove user from waiting room - exerciseType: {}, userId: {}",
                     exerciseType, userId);
             matchingService.leaveWaitingRoom(userId, exerciseType);
+            matchingService.deleteUsers();
         } else {
             log.warn("⚠️ Invalid key format: {}", expiredKey);
         }

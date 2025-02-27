@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 @SpringBootApplication
 public class GroupCallApplication {
 	public static void main(String[] args) {
+        System.setProperty("spring.devtools.restart.enabled", "false");
         SpringApplication.run(GroupCallApplication.class, args);
     }
 
